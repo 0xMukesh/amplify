@@ -12,7 +12,9 @@ itos = {i: s for s, i in stoi.items()}
 xs, ys = [], []
 
 for word in words:
-    for ch1, ch2, ch3 in zip(word[0], word[1:], word[2:]):
+    chs = ["."] + list(word) + ["."]
+
+    for ch1, ch2, ch3 in zip(chs, chs[1:], chs[2:]):
         idx1 = stoi[ch1]
         idx2 = stoi[ch2]
         idx3 = stoi[ch3]

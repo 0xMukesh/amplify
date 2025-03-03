@@ -22,5 +22,3 @@
    ```
 
 5. backward pass is performed and the weights are updated using basic SGD
-
-1.933
