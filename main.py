@@ -1,7 +1,35 @@
+import random
 import torch
+import torch.nn.functional as F
+
+BLOCK_SIZE = 3
+
+
+def build_dataset(words):
+    X, Y = [], []
+
+    for w in words:
+        context = [0] * BLOCK_SIZE
+
+        for ch in list(w) + ["."]:
+            X.append(context)
+            Y.append(stoi[ch])
+
+            context = context[1:] + [stoi[ch]]
+
+    return torch.tensor(X), torch.tensor(Y)
+
+
+def calculate_loss(x, y):
+    embedding = C[x].view(-1, 30)
+    res1 = (embedding @ W1 + b1).tanh()
+    res2 = (res1 @ W2 + b2)
+
+    loss = F.cross_entropy(res2, y)
+    return loss.item()
+
 
 words = open("names.txt", "r").read().splitlines()
-
 chars = sorted(set("".join(words)))
 
 stoi = {s: i+1 for i, s in enumerate(chars)}
@@ -9,60 +37,78 @@ stoi["."] = 0
 
 itos = {i: s for s, i in stoi.items()}
 
-xs, ys = [], []
+n1 = round(0.8 * len(words))
 
-for word in words:
-    chs = ["."] + list(word) + ["."]
+random.shuffle(words)
 
-    for ch1, ch2, ch3 in zip(chs, chs[1:], chs[2:]):
-        idx1 = stoi[ch1]
-        idx2 = stoi[ch2]
-        idx3 = stoi[ch3]
+X_train, Y_train = build_dataset(words[:n1])
+X_test, Y_test = build_dataset(words[n1:])
 
-        xs.append((idx1, idx2))
-        ys.append(idx3)
+# take in three characters into the context and embed them into a 2 dimensional space
+# and pass all the three characters together into the neural network
+C = torch.randn((27, 10))
 
-xs = torch.tensor(xs)
-ys = torch.tensor(ys)
+# layer 1
+# 6 to 100 neurons, fully connected layer and uses tanh as the activation function
+W1 = torch.randn((30, 100))
+b1 = torch.randn(100)
 
-xenc = torch.nn.functional.one_hot(xs, 27).float()  # Nx2x27
-xenc = xenc.view(-1, 2*27)
-W = torch.randn((2*27, 27), requires_grad=True)
+# layer 2
+# 100 to 27 neurons, fully connected layer and uses softmax as the activation function
+W2 = torch.randn((100, 27))
+b2 = torch.randn(27)
 
-for i in range(1000):
-    logits = (xenc @ W)
-    counts = logits.exp()
-    prob = counts/counts.sum(dim=1, keepdim=True)
+parameters = [C, W1, b1, W2, b2]
 
-    loss = -prob[torch.arange(ys.nelement()),
-                 ys].log().mean() + (0.01) * (W**2).mean()
+for p in parameters:
+    p.requires_grad = True
 
-    print(f"iter {i+1}: loss = {loss}")
 
-    W.grad = torch.zeros((2*27, 27))
+for i in range(200000):
+    # constructing a mini batch
+    # generates a tensor of size 32 elements with random numbers from [0, N)
+    ix = torch.randint(0, X_train.shape[0], (32,))
+
+    # forward pass
+    embedding = C[X_train[ix]].view(-1, 30)
+    res1 = (embedding @ W1 + b1).tanh()
+    res2 = (res1 @ W2 + b2)
+
+    # calculating the loss using cross entropy as the log function
+    loss = F.cross_entropy(res2, Y_train[ix])
+    loss.grad = None
+
+    print(f"iter no {i + 1} - loss = {loss}")
+
+    for p in parameters:
+        p.grad = torch.zeros_like(p)
+
     loss.backward()
-    W.data += -3 * W.grad
 
-for i in range(10):
-    out = [".", "."]
+    lr = 0.1 if i < 100000 else 0.01
 
+    for p in parameters:
+        if p.grad is not None:
+            p.data += -lr * p.grad
+
+training_loss = calculate_loss(X_train, Y_train)
+testing_loss = calculate_loss(X_test, Y_test)
+
+print(f"training loss - {training_loss}\ntesting loss - {testing_loss}")
+
+for _ in range(20):
+
+    out = []
+    context = [0] * BLOCK_SIZE  # initialize with all ...
     while True:
-        idx1 = stoi[out[-2]]
-        idx2 = stoi[out[-1]]
-
-        xenc = torch.nn.functional.one_hot(
-            torch.tensor([idx1, idx2], dtype=torch.long), num_classes=27).float()
-        xenc = xenc.view(-1, 2*27)
-
-        logits = xenc @ W
-        counts = logits.exp()
-        prob = counts/counts.sum(dim=1, keepdim=True)
-
-        ix = torch.multinomial(prob, num_samples=1, replacement=True).item()
-
-        out.append(itos[int(ix)])
-
+        emb = C[torch.tensor([context])]
+        h = torch.tanh(emb.view(1, -1) @ W1 + b1)
+        logits = h @ W2 + b2
+        probs = F.softmax(logits, dim=1)
+        ix = torch.multinomial(probs, num_samples=1).item()
+        context = context[1:] + [ix]
+        out.append(ix)
         if ix == 0:
             break
 
-    print("".join(out))
+    print(''.join(itos[i] for i in out))
