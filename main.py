@@ -97,18 +97,23 @@ testing_loss = calculate_loss(X_test, Y_test)
 print(f"training loss - {training_loss}\ntesting loss - {testing_loss}")
 
 for _ in range(20):
-
     out = []
-    context = [0] * BLOCK_SIZE  # initialize with all ...
+    context = [0] * BLOCK_SIZE
+
     while True:
-        emb = C[torch.tensor([context])]
-        h = torch.tanh(emb.view(1, -1) @ W1 + b1)
-        logits = h @ W2 + b2
-        probs = F.softmax(logits, dim=1)
+        embedding = C[torch.tensor([context])].view(
+            1, -1)  # (1, 3, 10) -> (1, 30)
+
+        res1 = torch.tanh(embedding @ W1 + b1)
+        res2 = res1 @ W2 + b2
+
+        probs = F.softmax(res2, dim=1)
         ix = torch.multinomial(probs, num_samples=1).item()
-        context = context[1:] + [ix]
-        out.append(ix)
+
         if ix == 0:
             break
 
-    print(''.join(itos[i] for i in out))
+        context = context[1:] + [ix]
+        out.append(itos[int(ix)])
+
+    print("".join(out))
