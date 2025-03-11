@@ -1,3 +1,4 @@
+from typing import List
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -10,6 +11,73 @@ N_HIDDEN = 200
 
 MAX_STEPS = 200000
 BATCH_SIZE = 32
+
+
+class Layer:
+    def __call__(self, x) -> torch.Tensor:
+        return torch.Tensor()
+
+    def parameters(self) -> List[torch.Tensor]:
+        return []
+
+
+class Linear(Layer):
+    def __init__(self, fan_in, fan_out, bias=True):
+        self.weight = torch.randn((fan_in, fan_out)) / fan_in ** 0.5
+        self.bias = torch.zeros(fan_out) if bias else None
+
+    def __call__(self, x):
+        self.out = x @ self.weight
+
+        if self.bias is not None:
+            self.out += self.bias
+
+        return self.out
+
+    def parameters(self) -> List[torch.Tensor]:
+        return [self.weight, self.bias] if self.bias is not None else [self.weight]
+
+
+class BatchNorm(Layer):
+    def __init__(self, dim, momentum=0.01):
+        self.momentum = momentum
+        self.gamma = torch.ones(dim)
+        self.beta = torch.zeros(dim)
+        self.bn_mean = torch.zeros(dim)
+        self.bn_std = torch.ones(dim)
+        self.training = True
+
+    def __call__(self, x):
+        if self.training:
+            mean = x.mean(0, keepdim=True)
+            std = x.std(0, keepdim=True)
+        else:
+            mean = self.bn_mean
+            std = self.bn_std
+
+        xhat = (x - mean)/(std)
+        self.out = self.gamma * xhat + self.beta
+
+        if self.training:
+            with torch.no_grad():
+                self.bn_mean = (1 - self.momentum) * \
+                    self.bn_mean + self.momentum * mean
+                self.bn_std = (1 - self.momentum) * \
+                    self.bn_std + self.momentum * std
+
+        return self.out
+
+    def parameters(self):
+        return [self.gamma, self.beta]
+
+
+class Tanh(Layer):
+    def __call__(self, x):
+        self.out = torch.tanh(x)
+        return self.out
+
+    def parameters(self):
+        return []
 
 
 def build_dataset(words):
@@ -34,13 +102,15 @@ def calculate_loss(split):
         "test": (X_test, Y_test)
     }[split]
 
-    embedding = C[x].view(-1, BLOCK_SIZE * N_EMBEDDING)
-    res1 = (embedding @ W1).tanh()
-    res1 = (res1 - bn_mean)/bn_std
-    res1 = bn_gain * res1 + bn_bias
-    res2 = (res1 @ W2 + b2)
+    x = C[x].view(-1, BLOCK_SIZE * N_EMBEDDING)
 
-    loss = F.cross_entropy(res2, y)
+    for layer in layers:
+        if isinstance(layer, BatchNorm):
+            layer.training = False
+
+        x = layer(x)
+
+    loss = F.cross_entropy(x, y)
     return loss.item()
 
 
@@ -59,27 +129,15 @@ random.shuffle(words)
 X_train, Y_train = build_dataset(words[:n1])
 X_test, Y_test = build_dataset(words[n1:])
 
-# take in three characters into the context and embed them into a 2 dimensional space
-# and pass all the three characters together into the neural network
 C = torch.randn((VOCAB_SIZE, N_EMBEDDING))
+layers = [
+    Linear(N_EMBEDDING * BLOCK_SIZE, N_HIDDEN),
+    Tanh(),
+    BatchNorm((1, N_HIDDEN)),
+    Linear(N_HIDDEN, VOCAB_SIZE),
+]
 
-# layer 1
-# 6 to 100 neurons, fully connected layer and uses tanh as the activation function
-W1 = torch.randn((N_EMBEDDING * BLOCK_SIZE, N_HIDDEN))
-W1 = nn.init.kaiming_normal_(W1, mode="fan_in", nonlinearity="tanh")
-
-# batchnorm layer
-bn_gain = torch.ones((1, N_HIDDEN))
-bn_bias = torch.zeros((1, N_HIDDEN))
-bn_mean = torch.zeros((1, N_HIDDEN))
-bn_std = torch.ones((1, N_HIDDEN))
-
-# layer 2
-# 100 to 27 neurons, fully connected layer and uses softmax as the activation function
-W2 = torch.randn((N_HIDDEN, VOCAB_SIZE)) * 0.01
-b2 = torch.zeros(VOCAB_SIZE)
-
-parameters = [C, W1, bn_gain, bn_bias, W2, b2]
+parameters = [C] + [p for layer in layers for p in layer.parameters()]
 
 for p in parameters:
     p.requires_grad = True
@@ -91,24 +149,14 @@ for i in range(MAX_STEPS):
     ix = torch.randint(0, X_train.shape[0], (BATCH_SIZE,))
 
     # forward pass
-    embedding = C[X_train[ix]].view(-1, N_EMBEDDING * BLOCK_SIZE)
-    pre_res1 = embedding @ W1
-    res1 = (embedding @ W1).tanh()
+    embedding = C[X_train[ix]]
+    x = embedding.view(-1, N_EMBEDDING * BLOCK_SIZE)
 
-    # batchnorm
-    bn_mean_i = res1.mean(0, keepdim=True)
-    bn_std_i = res1.std(0, keepdim=True)
-    res1 = (res1 - bn_mean_i)/bn_std_i
-    res1 = bn_gain * res1 + bn_bias
-
-    with torch.no_grad():
-        bn_mean = 0.999 * bn_mean + 0.001 * bn_mean_i
-        bn_std = 0.999 * bn_std + 0.001 * bn_std_i
-
-    res2 = (res1 @ W2 + b2)
+    for layer in layers:
+        x = layer(x)
 
     # calculating the loss using cross entropy as the log function
-    loss = F.cross_entropy(res2, Y_train[ix])
+    loss = F.cross_entropy(x, Y_train[ix])
     loss.grad = None
 
     print(f"iter no {i + 1} - loss = {loss}")
@@ -135,15 +183,16 @@ for _ in range(20):
     context = [0] * BLOCK_SIZE
 
     while True:
-        embedding = C[torch.tensor([context])].view(
+        x = C[torch.tensor([context])].view(
             1, BLOCK_SIZE * N_EMBEDDING)  # (1, 3, 10) -> (1, 30)
 
-        res1 = torch.tanh(embedding @ W1)
-        res1 = (res1 - bn_mean)/bn_std
-        res1 = bn_gain * res1 + bn_bias
-        res2 = res1 @ W2 + b2
+        for layer in layers:
+            if isinstance(layer, BatchNorm):
+                layer.training = False
 
-        probs = F.softmax(res2, dim=1)
+            x = layer(x)
+
+        probs = F.softmax(x, dim=1)
         ix = torch.multinomial(probs, num_samples=1).item()
 
         if ix == 0:
