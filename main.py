@@ -35,7 +35,9 @@ def calculate_loss(split):
     }[split]
 
     embedding = C[x].view(-1, BLOCK_SIZE * N_EMBEDDING)
-    res1 = (embedding @ W1 + b1).tanh()
+    res1 = (embedding @ W1).tanh()
+    res1 = (res1 - bn_mean)/bn_std
+    res1 = bn_gain * res1 + bn_bias
     res2 = (res1 @ W2 + b2)
 
     loss = F.cross_entropy(res2, y)
@@ -64,16 +66,20 @@ C = torch.randn((VOCAB_SIZE, N_EMBEDDING))
 # layer 1
 # 6 to 100 neurons, fully connected layer and uses tanh as the activation function
 W1 = torch.randn((N_EMBEDDING * BLOCK_SIZE, N_HIDDEN))
-b1 = torch.randn(N_HIDDEN) * 0.01
-
 W1 = nn.init.kaiming_normal_(W1, mode="fan_in", nonlinearity="tanh")
+
+# batchnorm layer
+bn_gain = torch.ones((1, N_HIDDEN))
+bn_bias = torch.zeros((1, N_HIDDEN))
+bn_mean = torch.zeros((1, N_HIDDEN))
+bn_std = torch.ones((1, N_HIDDEN))
 
 # layer 2
 # 100 to 27 neurons, fully connected layer and uses softmax as the activation function
 W2 = torch.randn((N_HIDDEN, VOCAB_SIZE)) * 0.01
 b2 = torch.zeros(VOCAB_SIZE)
 
-parameters = [C, W1, b1, W2, b2]
+parameters = [C, W1, bn_gain, bn_bias, W2, b2]
 
 for p in parameters:
     p.requires_grad = True
@@ -86,8 +92,18 @@ for i in range(MAX_STEPS):
 
     # forward pass
     embedding = C[X_train[ix]].view(-1, N_EMBEDDING * BLOCK_SIZE)
-    pre_res1 = embedding @ W1 + b1
-    res1 = (embedding @ W1 + b1).tanh()
+    pre_res1 = embedding @ W1
+    res1 = (embedding @ W1).tanh()
+
+    # batchnorm
+    bn_mean_i = res1.mean(0, keepdim=True)
+    bn_std_i = res1.std(0, keepdim=True)
+    res1 = (res1 - bn_mean_i)/bn_std_i
+    res1 = bn_gain * res1 + bn_bias
+
+    with torch.no_grad():
+        bn_mean = 0.999 * bn_mean + 0.001 * bn_mean_i
+        bn_std = 0.999 * bn_std + 0.001 * bn_std_i
 
     res2 = (res1 @ W2 + b2)
 
@@ -122,7 +138,9 @@ for _ in range(20):
         embedding = C[torch.tensor([context])].view(
             1, BLOCK_SIZE * N_EMBEDDING)  # (1, 3, 10) -> (1, 30)
 
-        res1 = torch.tanh(embedding @ W1 + b1)
+        res1 = torch.tanh(embedding @ W1)
+        res1 = (res1 - bn_mean)/bn_std
+        res1 = bn_gain * res1 + bn_bias
         res2 = res1 @ W2 + b2
 
         probs = F.softmax(res2, dim=1)
