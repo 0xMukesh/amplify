@@ -1,6 +1,6 @@
+from abc import ABC, abstractmethod
 from typing import List
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import random
 
@@ -13,16 +13,22 @@ MAX_STEPS = 200000
 BATCH_SIZE = 32
 
 
-class Layer:
-    def __call__(self, x) -> torch.Tensor:
-        return torch.Tensor()
+class Layer(ABC):
+    def __init__(self):
+        self.training = True
 
+    @abstractmethod
+    def __call__(self, x) -> torch.Tensor:
+        pass
+
+    @abstractmethod
     def parameters(self) -> List[torch.Tensor]:
-        return []
+        pass
 
 
 class Linear(Layer):
     def __init__(self, fan_in, fan_out, bias=True):
+        super().__init__()
         self.weight = torch.randn((fan_in, fan_out)) / fan_in ** 0.5
         self.bias = torch.zeros(fan_out) if bias else None
 
@@ -34,18 +40,19 @@ class Linear(Layer):
 
         return self.out
 
-    def parameters(self) -> List[torch.Tensor]:
+    def parameters(self):
         return [self.weight, self.bias] if self.bias is not None else [self.weight]
 
 
 class BatchNorm(Layer):
     def __init__(self, dim, momentum=0.01):
+        super().__init__()
         self.momentum = momentum
         self.gamma = torch.ones(dim)
         self.beta = torch.zeros(dim)
         self.bn_mean = torch.zeros(dim)
         self.bn_std = torch.ones(dim)
-        self.training = True
+        # self.training = True
 
     def __call__(self, x):
         if self.training:
@@ -72,12 +79,63 @@ class BatchNorm(Layer):
 
 
 class Tanh(Layer):
+    def __init__(self):
+        super().__init__()
+
     def __call__(self, x):
         self.out = torch.tanh(x)
         return self.out
 
     def parameters(self):
         return []
+
+
+class Embedding(Layer):
+    def __init__(self, num_embeddings, embedding_dim):
+        super().__init__()
+        self.weight = torch.randn((num_embeddings, embedding_dim))
+
+    def __call__(self, x):
+        self.out = self.weight[x]
+        return self.out
+
+    def parameters(self):
+        return [self.weight]
+
+
+class Flatten(Layer):
+    def __init__(self):
+        super().__init__()
+
+    def __call__(self, x):
+        self.out = x.view(x.shape[0], -1)
+        return self.out
+
+    def parameters(self):
+        return []
+
+
+class Sequential(Layer):
+    def __init__(self, layers: List[Layer]):
+        super().__init__()
+        self.layers = layers
+
+    def __call__(self, x):
+        self.out = x
+        for layer in self.layers:
+            self.out = layer(self.out)
+        return self.out
+
+    def parameters(self):
+        return [p for layer in self.layers for p in layer.parameters()]
+
+    def eval(self):
+        for layer in self.layers:
+            layer.training = False
+
+    def train(self):
+        for layer in self.layers:
+            layer.training = True
 
 
 def build_dataset(words):
@@ -102,13 +160,9 @@ def calculate_loss(split):
         "test": (X_test, Y_test)
     }[split]
 
-    x = C[x].view(-1, BLOCK_SIZE * N_EMBEDDING)
-
-    for layer in layers:
-        if isinstance(layer, BatchNorm):
-            layer.training = False
-
-        x = layer(x)
+    model.eval()
+    x = model(x)
+    model.train()
 
     loss = F.cross_entropy(x, y)
     return loss.item()
@@ -129,43 +183,41 @@ random.shuffle(words)
 X_train, Y_train = build_dataset(words[:n1])
 X_test, Y_test = build_dataset(words[n1:])
 
-C = torch.randn((VOCAB_SIZE, N_EMBEDDING))
-layers = [
+model = Sequential([
+    Embedding(VOCAB_SIZE, N_EMBEDDING),
+    Flatten(),
     Linear(N_EMBEDDING * BLOCK_SIZE, N_HIDDEN),
     Tanh(),
     BatchNorm((1, N_HIDDEN)),
     Linear(N_HIDDEN, VOCAB_SIZE),
-]
+])
 
-parameters = [C] + [p for layer in layers for p in layer.parameters()]
+parameters = model.parameters()
 
 for p in parameters:
     p.requires_grad = True
 
 
 for i in range(MAX_STEPS):
-    # constructing a mini batch
-    # generates a tensor of size 32 elements with random numbers from [0, N)
     ix = torch.randint(0, X_train.shape[0], (BATCH_SIZE,))
 
     # forward pass
-    embedding = C[X_train[ix]]
-    x = embedding.view(-1, N_EMBEDDING * BLOCK_SIZE)
+    x = model(X_train[ix])
 
-    for layer in layers:
-        x = layer(x)
-
-    # calculating the loss using cross entropy as the log function
+    # calculating loss
     loss = F.cross_entropy(x, Y_train[ix])
     loss.grad = None
 
     print(f"iter no {i + 1} - loss = {loss}")
 
+    # setting gradients to zero
     for p in parameters:
         p.grad = torch.zeros_like(p)
 
+    # backpropagation
     loss.backward()
 
+    # optimization (SGD)
     lr = 0.1 if i < 100000 else 0.01
 
     for p in parameters:
@@ -183,14 +235,11 @@ for _ in range(20):
     context = [0] * BLOCK_SIZE
 
     while True:
-        x = C[torch.tensor([context])].view(
-            1, BLOCK_SIZE * N_EMBEDDING)  # (1, 3, 10) -> (1, 30)
+        x = torch.tensor([context])
 
-        for layer in layers:
-            if isinstance(layer, BatchNorm):
-                layer.training = False
-
-            x = layer(x)
+        model.eval()
+        x = model(x)
+        model.train()
 
         probs = F.softmax(x, dim=1)
         ix = torch.multinomial(probs, num_samples=1).item()
